@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { monoNow } from './time.js';
-import { judgeSnapshot, INITIAL_BASELINE } from './guard.js';
+import { judgeSnapshot, judgeCue, INITIAL_BASELINE, INITIAL_CUE_BASELINE } from './guard.js';
 
 // 单一 WebSocket 连接管理：
 //  - 自动重连（指数退避，上限 5s）；
 //  - 快照版本守卫：低版本 / 旧纪元（服务端重启前）消息一律丢弃，画面不回滚；
-//  - 控制台心跳续租，断线自动重新申请控制权。
+//  - 提示（cue）守卫：旧 cueSeq / 旧纪元提示一律丢弃，新提示覆盖旧提示；
+//  - 控制台心跳续租，断线自动重新申请控制权；
+//  - 投屏每次连接/重连用持久屏幕 ID 注册，重连后补发未确认最新提示。
 const HEARTBEAT_MS = 5000;
 const RETRY_BASE_MS = 500;
 const RETRY_MAX_MS = 5000;
 
-export function useSocket({ role }) {
+export function useSocket({ role, screenRef }) {
   const [snap, setSnap] = useState(null);
+  const [screens, setScreens] = useState([]);          // 控制台：所有投屏及最新提示状态
+  const [cue, setCue] = useState(null);                // 投屏：当前上屏的提示
+  const [screenConflict, setScreenConflict] = useState(false); // 投屏：同一 ID 被新连接顶替
   const [connState, setConnState] = useState('connecting'); // connecting | open | reconnecting
   const [control, setControl] = useState({ granted: false });
   const [lastError, setLastError] = useState(null);
@@ -21,6 +26,10 @@ export function useSocket({ role }) {
   const wantControlRef = useRef(role === 'console'); // 控制台始终希望持有控制权
   const myIdRef = useRef(null);
   const baselineRef = useRef({ ...INITIAL_BASELINE });
+  const cueBaselineRef = useRef({ ...INITIAL_CUE_BASELINE });
+  const reportedCueRef = useRef(0); // 已上报“已显示”的 cueSeq（同一条补发不重复上报）
+  const screenRefRef = useRef(screenRef);
+  screenRefRef.current = screenRef;
 
   const send = useCallback((obj) => {
     const ws = wsRef.current;
@@ -40,6 +49,22 @@ export function useSocket({ role }) {
 
   const clearError = useCallback(() => setLastError(null), []);
 
+  // 投屏修改显示名：持久化后重发注册（服务端立即改名并广播）
+  const renameScreen = useCallback((name) => {
+    const sid = screenRefRef.current;
+    if (!sid) return;
+    send({ command: 'screen_rename', screenId: sid.id, name });
+  }, [send]);
+
+  // 投屏人工确认当前提示：本地立即收起覆盖层（确认随后随名单对账），
+  // 迟到的旧提示不会重新弹出——守卫只认 cueSeq 更高/相等。
+  const ackCue = useCallback((cueSeq) => {
+    const sid = screenRefRef.current;
+    if (!sid) return;
+    send({ command: 'cue_ack', screenId: sid.id, cueSeq });
+    setCue((cur) => (cur && cur.cueSeq === cueSeq ? null : cur));
+  }, [send]);
+
   useEffect(() => {
     let disposed = false;
     let heartbeatTimer = null;
@@ -53,11 +78,23 @@ export function useSocket({ role }) {
       ws.addEventListener('open', () => {
         retryRef.current = 0;
         setConnState('open');
-        // 重连后旧租约已被服务端释放，若之前持有/需要控制权则重新申请
-        if (wantControlRef.current) ws.send(JSON.stringify({ command: 'acquire' }));
-        heartbeatTimer = setInterval(() => {
-          ws.send(JSON.stringify({ command: 'heartbeat' }));
-        }, HEARTBEAT_MS);
+        // 投屏：每次连接都用持久屏幕 ID 注册；重连后服务端补发未确认最新提示
+        if (role === 'display' && screenRefRef.current) {
+          const sid = screenRefRef.current;
+          ws.send(JSON.stringify({
+            command: 'screen_register',
+            screenId: sid.id,
+            name: sid.name,
+          }));
+        }
+        // 重连后旧租约已被服务端释放，若之前持有/需要控制权则重新申请；
+        // 仅控制台续租，投屏不发心跳（避免无意义的 NOT_CONTROLLER 错误）。
+        if (role === 'console') {
+          if (wantControlRef.current) ws.send(JSON.stringify({ command: 'acquire' }));
+          heartbeatTimer = setInterval(() => {
+            ws.send(JSON.stringify({ command: 'heartbeat' }));
+          }, HEARTBEAT_MS);
+        }
       });
 
       ws.addEventListener('message', (ev) => {
@@ -72,6 +109,8 @@ export function useSocket({ role }) {
           myIdRef.current = msg.clientId;
           // 连接/重连首包显式建立纪元基线；服务端重启后 epoch 变化，重置版本号
           baselineRef.current = { currentEpoch: msg.epoch, currentVersion: 0 };
+          cueBaselineRef.current = { currentEpoch: msg.epoch, cueSeq: 0 };
+          reportedCueRef.current = 0;
           return;
         }
 
@@ -90,6 +129,46 @@ export function useSocket({ role }) {
               ? { granted: true, holderId: msg.holderId }
               : { granted: false, holderId: msg.holderId, locked: msg.locked };
           });
+          return;
+        }
+
+        if (msg.type === 'screens') {
+          // 屏幕名单（含每屏最新提示与状态）由服务端权威整体替换
+          setScreens(Array.isArray(msg.screens) ? msg.screens : []);
+          return;
+        }
+
+        if (msg.type === 'cue' && role === 'display') {
+          // 提示守卫：旧纪元 / 更小 cueSeq 的迟到消息一律丢弃；
+          // cueSeq 相等为重连同一条补发（幂等），更大为新提示（覆盖）。
+          const verdict = judgeCue(cueBaselineRef.current, msg);
+          if (!verdict.accept) return;
+          cueBaselineRef.current = { currentEpoch: verdict.epoch, cueSeq: verdict.cueSeq };
+          const sid = screenRefRef.current;
+          const nextCue = { cueSeq: msg.cueSeq, cueType: msg.cueType, text: msg.text };
+          setCue(nextCue);
+          setScreenConflict(false);
+          // 新提示（或重启纪元后的首条）通知服务端“已上屏”；同一条补发不重复上报
+          if (verdict.fresh || reportedCueRef.current !== msg.cueSeq) {
+            reportedCueRef.current = msg.cueSeq;
+            send({ command: 'cue_displayed', screenId: sid?.id, cueSeq: msg.cueSeq });
+          }
+          return;
+        }
+
+        if (msg.type === 'screen_hello' && role === 'display') {
+          // 注册/改名确认：服务端规范化后的显示名回填本地身份
+          if (msg.screen && screenRefRef.current?.id === msg.screen.id) {
+            screenRefRef.current.name = msg.screen.name;
+            setScreens((prev) => (prev.length ? prev : [msg.screen]));
+          }
+          return;
+        }
+
+        if (msg.type === 'screen_conflict' && role === 'display') {
+          // 同一持久屏幕 ID 被更新的连接注册（通常是本屏页面被顶替）：
+          // 本连接不再代表该屏，提示用户且不再上屏/确认，避免双屏互相打架。
+          setScreenConflict(true);
           return;
         }
 
@@ -139,23 +218,28 @@ export function useSocket({ role }) {
       clearTimeout(reconnectTimerRef.current);
       const ws = wsRef.current;
       if (ws) {
-        // 正常卸载：通知服务端释放租约
-        if (wantControlRef.current && ws.readyState === ws.OPEN) {
+        // 正常卸载：通知服务端释放租约（投屏无需额外注销，close 即标记离线）
+        if (role === 'console' && wantControlRef.current && ws.readyState === ws.OPEN) {
           ws.send(JSON.stringify({ command: 'release' }));
         }
         ws.close();
       }
     };
-  }, []);
+  }, [role, send]);
 
   return {
     snap,
+    screens,
+    cue,
+    screenConflict,
     connState,
     control,
     lastError,
     send,
     acquire,
     release,
+    renameScreen,
+    ackCue,
     clearError,
   };
 }

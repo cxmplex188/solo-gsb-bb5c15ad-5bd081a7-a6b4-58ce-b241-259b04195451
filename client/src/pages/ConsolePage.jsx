@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { useSocket } from '../useSocket.js';
 import { formatTime, formatClock, formatDeviation, liveRemaining, liveAgenda } from '../time.js';
 import AgendaPanel from './AgendaPanel.jsx';
+import CuePanel from './CuePanel.jsx';
 
 // 控制台：同一时刻全服务仅一个实例可持有控制权。
 export default function ConsolePage() {
-  const { snap, connState, control, lastError, send, acquire, release, clearError } =
+  const { snap, screens, connState, control, lastError, send, acquire, release, clearError } =
     useSocket({ role: 'console' });
   const [minutes, setMinutes] = useState(5);
   const [seconds, setSeconds] = useState(0);
@@ -190,6 +191,13 @@ export default function ConsolePage() {
         </div>
         <p className="hint">运行中不可修改时长；应用新时长会回到待开始状态。</p>
       </fieldset>
+
+      <CuePanel
+        screens={screens}
+        canSend={control.granted}
+        send={send}
+        lastError={lastError}
+      />
 
       <AgendaPanel
         snap={snap}

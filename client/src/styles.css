@@ -371,3 +371,183 @@ body {
   letter-spacing: .1vw;
 }
 .display-next-short .display-next-time { color: var(--red); }
+
+/* ---------------- 后台提示：投屏全屏覆盖层 ---------------- */
+.display-cue-mode {
+  background: radial-gradient(ellipse at center, #10244a 0%, #070c18 70%);
+}
+.cue-overlay {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3vh;
+  padding: 4vh 4vw;
+  text-align: center;
+  z-index: 5;
+  animation: cue-in .25s ease-out;
+}
+@keyframes cue-in {
+  from { opacity: 0; transform: scale(.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+.cue-overlay-label {
+  font-size: 2.6vw;
+  letter-spacing: 1.2vw;
+  color: var(--muted);
+  text-indent: 1.2vw;
+}
+.cue-overlay-text {
+  font-size: 13vw;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: .6vw;
+  text-shadow: 0 0 80px rgba(79, 140, 255, .35);
+  word-break: break-word;
+  max-width: 92vw;
+}
+.cue-ack-btn {
+  appearance: none;
+  margin-top: 2vh;
+  padding: 2vh 5vw;
+  font-size: 2.6vw;
+  font-weight: 700;
+  letter-spacing: .4vw;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 0 40px rgba(79, 140, 255, .45);
+  transition: transform .12s;
+}
+.cue-ack-btn:hover { transform: scale(1.04); }
+.cue-overlay-hint {
+  font-size: 1.2vw;
+  color: #5d6983;
+  font-variant-numeric: tabular-nums;
+}
+.cue-stage { color: var(--green); }
+.cue-stage .cue-overlay-label { color: var(--green); }
+.cue-stage .cue-overlay-text { color: var(--green); text-shadow: 0 0 80px rgba(46, 204, 113, .45); }
+.cue-stage .cue-ack-btn { background: var(--green); box-shadow: 0 0 40px rgba(46, 204, 113, .45); }
+.display-cue-mode:has(.cue-hurry) { background: radial-gradient(ellipse at center, #3a2a08 0%, #1a1206 70%); }
+.cue-hurry .cue-overlay-label,
+.cue-hurry .cue-overlay-text { color: var(--amber); }
+.cue-hurry .cue-overlay-text { text-shadow: 0 0 90px rgba(255, 176, 32, .6); animation: pulse-amber 1s ease-in-out infinite; }
+.cue-hurry .cue-ack-btn { background: var(--amber); color: #231700; box-shadow: 0 0 40px rgba(255, 176, 32, .5); }
+.display-cue-mode:has(.cue-finish) { background: radial-gradient(ellipse at center, #4a1010 0%, #1c0606 70%); }
+.cue-finish .cue-overlay-label,
+.cue-finish .cue-overlay-text { color: var(--red); }
+.cue-finish .cue-overlay-text { text-shadow: 0 0 100px rgba(255, 68, 68, .7); animation: pulse-red 1s ease-in-out infinite; }
+.cue-finish .cue-ack-btn { background: var(--red); box-shadow: 0 0 40px rgba(255, 68, 68, .5); }
+
+/* 投屏左下角：显示名设置 */
+.display-screen-chip {
+  position: absolute;
+  left: 20px;
+  bottom: 16px;
+  z-index: 11;
+  font-size: 13px;
+  color: #64718c;
+}
+.screen-name-view { display: inline-flex; align-items: center; gap: 8px; }
+.screen-name-btn {
+  appearance: none;
+  border: 1px solid #2c3750;
+  background: rgba(22, 29, 46, .8);
+  color: #8b97ad;
+  border-radius: 6px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.screen-name-btn:hover { border-color: var(--accent); color: var(--text); }
+.screen-name-edit { display: inline-flex; align-items: center; gap: 6px; }
+.screen-name-edit input {
+  width: 180px;
+  padding: 6px 10px;
+  font-size: 14px;
+  border-radius: 6px;
+  border: 1px solid #33405f;
+  background: var(--panel-2);
+  color: var(--text);
+}
+.screen-conflict-banner {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  max-width: 80vw;
+  padding: 12px 28px;
+  background: rgba(255, 68, 68, .18);
+  border: 1px solid rgba(255, 68, 68, .6);
+  color: #ff9b9b;
+  border-radius: 12px;
+  font-size: 18px;
+  text-align: center;
+}
+
+/* ---------------- 后台提示：控制台面板 ---------------- */
+.cue-panel .btn-cue { min-width: 96px; }
+.cue-btn-stage { background: rgba(46, 204, 113, .15); border-color: rgba(46, 204, 113, .5); color: var(--green); }
+.cue-btn-hurry { background: rgba(255, 176, 32, .15); border-color: rgba(255, 176, 32, .5); color: var(--amber); }
+.cue-btn-finish { background: rgba(255, 68, 68, .15); border-color: rgba(255, 68, 68, .5); color: #ff7676; }
+
+.cue-screens { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 14px; }
+.cue-screen-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.5fr) 110px minmax(220px, 2fr);
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid transparent;
+}
+.cue-screen-head {
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 12px;
+}
+.cue-row-selected {
+  border-color: rgba(79, 140, 255, .7);
+  box-shadow: 0 0 14px rgba(79, 140, 255, .12);
+}
+.cue-row-offline { opacity: .65; }
+.cue-screen-pick { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
+.cue-screen-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cue-check-all { cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.cue-col-status { font-size: 13px; font-variant-numeric: tabular-nums; }
+.cue-online { color: var(--green); }
+.cue-offline { color: var(--muted); }
+.cue-col-cue { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.cue-latest-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #aebbd4;
+}
+.cue-none { color: #5e6b85; }
+.cue-tag-offline { color: var(--muted); border-color: #3a4665; background: rgba(139, 151, 173, .1); }
+.cue-status-pending { color: var(--amber); border-color: rgba(255, 176, 32, .6); background: rgba(255, 176, 32, .12); }
+.cue-status-displayed { color: var(--accent); border-color: rgba(79, 140, 255, .6); background: rgba(79, 140, 255, .12); }
+.cue-status-acknowledged { color: var(--green); border-color: rgba(46, 204, 113, .6); background: rgba(46, 204, 113, .12); }
+
+.cue-send { display: flex; flex-direction: column; gap: 10px; }
+.cue-presets { display: flex; gap: 10px; flex-wrap: wrap; }
+.cue-custom { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cue-custom input {
+  flex: 1 1 260px;
+  min-width: 220px;
+  padding: 10px 12px;
+  font-size: 15px;
+  border-radius: 8px;
+  border: 1px solid #33405f;
+  background: var(--panel-2);
+  color: var(--text);
+}
+.cue-counter { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }

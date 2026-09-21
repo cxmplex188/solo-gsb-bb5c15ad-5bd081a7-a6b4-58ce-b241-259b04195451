@@ -86,6 +86,169 @@ function virtElapsedMs() {
 let version = 0;        // 单调递增版本号，永不在运行期内归零
 const epoch = epochId(); // 服务进程纪元：客户端用它识别“服务端已重启”
 
+// ---------------------------------------------------------------------------
+// 后台提示（cue）
+// 每块投屏首次打开自行生成持久屏幕 ID（localStorage），每次连接用它注册。
+// 服务端内存保存每屏最新一条提示与状态，不引入任何第三方服务/持久化：
+//   pending（未送达/未上屏）→ displayed（已显示）→ acknowledged（已确认）
+// cueSeq 全服务单调递增：新提示覆盖旧提示；迟到的旧确认/旧提示一律按 seq 丢弃。
+// 提示只对目标屏单播，非目标屏既收不到也不能代为确认。
+// ---------------------------------------------------------------------------
+const CUE_PRESETS = { stage: '请上场', hurry: '加快', finish: '结束' };
+const MAX_CUSTOM_CUE_LEN = 30;
+const MAX_SCREEN_NAME_LEN = 20;
+const SCREEN_ID_RE = /^s-[0-9a-zA-Z-]{8,64}$/;
+
+let cueSeq = 0;
+const screens = new Map(); // screenId -> { id, name, online, ws, client, cue }
+
+const defaultScreenName = (id) => `投屏 ${String(id).slice(2, 8).toUpperCase()}`;
+
+function cleanScreenName(raw, fallback) {
+  const name = String(raw ?? '').trim().slice(0, MAX_SCREEN_NAME_LEN);
+  return name || fallback;
+}
+
+function publicScreen(rec) {
+  return { id: rec.id, name: rec.name, online: rec.online, cue: rec.cue };
+}
+
+function broadcastScreens() {
+  const msg = { type: 'screens', epoch, screens: [...screens.values()].map(publicScreen) };
+  for (const c of clients) send(c.ws, msg);
+}
+
+// 在线立即单播；离线（ws 缺失）保持 pending，待其重连注册时补发
+function deliverCue(rec) {
+  if (rec.cue && rec.online && rec.ws && rec.ws.readyState === 1) {
+    send(rec.ws, {
+      type: 'cue',
+      epoch,
+      cueSeq: rec.cue.seq,
+      cueType: rec.cue.type,
+      text: rec.cue.text,
+    });
+  }
+}
+
+// 投屏注册/重连：同一屏幕 ID 以最新连接为准（旧连接收到冲突通知并不再代表该屏）
+function registerScreen(client, rawId, rawName) {
+  const id = String(rawId ?? '');
+  if (!SCREEN_ID_RE.test(id)) {
+    fail(client, 'BAD_SCREEN', '屏幕 ID 非法');
+    return;
+  }
+  const old = screens.get(id);
+  if (old && old.client && old.client !== client && old.ws && old.ws.readyState === 1) {
+    old.client.screenId = null;
+    send(old.ws, { type: 'screen_conflict', reason: 'replaced', screenId: id });
+  }
+  const fallback = defaultScreenName(id);
+  const rec = old ?? { id, name: fallback, online: false, ws: null, client: null, cue: null };
+  // 注册携带显示名（投屏本地持久化）；缺省时沿用服务端已有名称
+  if (String(rawName ?? '').trim()) rec.name = cleanScreenName(rawName, fallback);
+  else if (!old) rec.name = fallback;
+  rec.online = true;
+  rec.ws = client.ws;
+  rec.client = client;
+  client.screenId = id;
+  screens.set(id, rec);
+
+  send(client.ws, { type: 'screen_hello', screen: publicScreen(rec) });
+  // 断线重连：补发该屏“未确认”的最新提示（已确认的不再出现）
+  if (rec.cue && rec.cue.status !== 'acknowledged') deliverCue(rec);
+  broadcastScreens();
+}
+
+function renameScreen(client, msg) {
+  if (!client.screenId || client.screenId !== String(msg.screenId ?? '')) {
+    fail(client, 'NOT_YOUR_SCREEN', '该连接未注册为此屏幕，不能改名');
+    return;
+  }
+  const rec = screens.get(client.screenId);
+  if (!rec) {
+    fail(client, 'NOT_SCREEN', '屏幕尚未注册');
+    return;
+  }
+  rec.name = cleanScreenName(msg.name, defaultScreenName(rec.id));
+  send(client.ws, { type: 'screen_hello', screen: publicScreen(rec) });
+  broadcastScreens();
+}
+
+// 投屏上报“已显示/已确认”。只接受本连接所注册屏幕、且 seq 等于其最新提示的上报；
+// 迟到的旧 seq、未知屏幕、替别人上报一律忽略/拒绝，绝不改动新提示状态。
+function reportCue(client, msg, nextStatus) {
+  const seq = Number(msg.cueSeq);
+  if (!client.screenId || client.screenId !== String(msg.screenId ?? '')) {
+    fail(client, 'NOT_YOUR_SCREEN', '不能替其他屏幕上报提示状态');
+    return;
+  }
+  const rec = screens.get(client.screenId);
+  if (!rec || !rec.cue || !Number.isInteger(seq) || rec.cue.seq !== seq) return; // 迟到/未知：静默丢弃
+  if (nextStatus === 'displayed' && rec.cue.status === 'pending') {
+    rec.cue.status = 'displayed';
+    broadcastScreens();
+  } else if (nextStatus === 'acknowledged' && rec.cue.status !== 'acknowledged') {
+    rec.cue.status = 'acknowledged';
+    broadcastScreens();
+  }
+}
+
+// 控制台发送提示：目标为屏幕 ID 数组（一块/多块，可含离线屏排队补发）或 '*'（全部在线屏）
+function sendCueCommand(client, msg) {
+  let ids;
+  if (msg.targets === '*' || msg.targets === 'all') {
+    ids = [...screens.values()].filter((r) => r.online).map((r) => r.id);
+    if (ids.length === 0) {
+      fail(client, 'NO_SCREEN', '当前没有在线投屏');
+      return;
+    }
+  } else if (Array.isArray(msg.targets)) {
+    if (msg.targets.length === 0) {
+      fail(client, 'BAD_CUE', '未选择目标投屏');
+      return;
+    }
+    ids = [];
+    for (const t of new Set(msg.targets)) {
+      const id = String(t ?? '');
+      if (!screens.has(id)) {
+        fail(client, 'BAD_TARGET', `目标投屏不存在：${id}`);
+        return;
+      }
+      ids.push(id);
+    }
+  } else {
+    fail(client, 'BAD_CUE', 'targets 必须为屏幕 ID 数组或 "*"');
+    return;
+  }
+
+  const type = String(msg.cueType ?? '');
+  let text;
+  if (type === 'custom') {
+    // 先按原始长度校验（超长直接拒绝，不静默截断），通过后再兜底截断
+    const rawText = String(msg.text ?? '').trim();
+    if (rawText.length === 0 || rawText.length > MAX_CUSTOM_CUE_LEN) {
+      fail(client, 'BAD_CUE', `自定义提示需为 1~${MAX_CUSTOM_CUE_LEN} 字`);
+      return;
+    }
+    text = rawText.slice(0, MAX_CUSTOM_CUE_LEN);
+  } else if (CUE_PRESETS[type]) {
+    text = CUE_PRESETS[type]; // 预设文案以服务端为准
+  } else {
+    fail(client, 'BAD_CUE', '提示类型非法');
+    return;
+  }
+
+  // 同一次发送（可含多目标）共用一个严格递增的 cueSeq
+  const seq = ++cueSeq;
+  for (const id of ids) {
+    const rec = screens.get(id);
+    rec.cue = { seq, type, text, status: 'pending' }; // 新提示直接覆盖旧提示
+    deliverCue(rec);
+  }
+  broadcastScreens();
+}
+
 function remainingNow() {
   if (timer.phase === 'running') {
     return Math.max(0, timer.deadlineMono - nowMono());
@@ -290,7 +453,11 @@ function fail(client, code, message) {
 function handleCommand(client, msg) {
   const cmd = msg.command;
 
-  if (cmd !== 'acquire' && cmd !== 'heartbeat' && cmd !== 'release') {
+  const PUBLIC_COMMANDS = new Set([
+    'acquire', 'heartbeat', 'release',
+    'screen_register', 'screen_rename', 'cue_displayed', 'cue_ack',
+  ]);
+  if (!PUBLIC_COMMANDS.has(cmd)) {
     if (!holder || holder.id !== client.id) {
       fail(client, 'NOT_CONTROLLER', '当前控制台未持有控制权');
       return;
@@ -448,6 +615,36 @@ function handleCommand(client, msg) {
       return;
     }
 
+    case 'screen_register': {
+      // 投屏注册（每次连接/重连均调用）：携带持久屏幕 ID 与显示名
+      registerScreen(client, msg.screenId, msg.name);
+      return;
+    }
+
+    case 'screen_rename': {
+      // 投屏修改自己的显示名
+      renameScreen(client, msg);
+      return;
+    }
+
+    case 'cue_displayed': {
+      // 目标投屏确认已上屏
+      reportCue(client, msg, 'displayed');
+      return;
+    }
+
+    case 'cue_ack': {
+      // 目标投屏人工确认
+      reportCue(client, msg, 'acknowledged');
+      return;
+    }
+
+    case 'cue_send': {
+      // 控制台向一块/多块/全部在线投屏发送提示（仅持有者）
+      sendCueCommand(client, msg);
+      return;
+    }
+
     default:
       fail(client, 'UNKNOWN_COMMAND', `未知指令: ${cmd}`);
   }
@@ -471,6 +668,7 @@ function makeClient(ws) {
     ws,
     joinedMono: nowMono(),
     lastDenyAtMono: 0,
+    screenId: null, // 若本连接注册为投屏，记录其屏幕 ID（每连接最多一块屏）
   };
   ws.on('message', (data) => {
     let msg;
@@ -492,6 +690,16 @@ function makeClient(ws) {
     if (holder && holder.id === client.id) {
       releaseHolder('disconnected'); // 断线即释放唯一控制权
     }
+    // 投屏断线：在线状态置否（最新提示状态保留，未确认提示待重连补发）
+    if (client.screenId) {
+      const rec = screens.get(client.screenId);
+      if (rec && rec.client === client) {
+        rec.online = false;
+        rec.ws = null;
+        rec.client = null;
+        broadcastScreens();
+      }
+    }
   });
   ws.on('error', (err) => console.error('[ws error]', err.message));
   return client;
@@ -500,9 +708,10 @@ function makeClient(ws) {
 wss.on('connection', (ws) => {
   const client = makeClient(ws);
   clients.add(client);
-  // 连接/重连首包：自报身份 + 权威快照（恢复同一剩余时间）
+  // 连接/重连首包：自报身份 + 权威快照（恢复同一剩余时间）+ 当前屏幕名单
   send(ws, { type: 'hello', clientId: client.id, epoch });
   send(ws, buildSnapshot());
+  send(ws, { type: 'screens', epoch, screens: [...screens.values()].map(publicScreen) });
 });
 
 setInterval(tick, TICK_MS).unref();
