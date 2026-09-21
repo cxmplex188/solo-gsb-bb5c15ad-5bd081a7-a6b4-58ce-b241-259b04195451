@@ -371,3 +371,191 @@ body {
   letter-spacing: .1vw;
 }
 .display-next-short .display-next-time { color: var(--red); }
+
+/* ---------------- 投屏：屏幕显示名徽标 ---------------- */
+.screen-badge {
+  position: absolute;
+  left: 1.6vw;
+  bottom: 1.4vh;
+  display: inline-flex;
+  align-items: center;
+  gap: .6vw;
+  padding: .5vh 1vw;
+  font-size: 1.15vw;
+  color: #8b97ad;
+  background: rgba(22, 29, 46, .7);
+  border: 1px solid #2c3750;
+  border-radius: 999px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.screen-badge:hover { color: var(--text); border-color: var(--accent); }
+.screen-badge-edit { font-size: .9vw; opacity: .7; }
+.screen-name-input {
+  width: 220px;
+  padding: 6px 10px;
+  font-size: 14px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* ---------------- 投屏：后台提示全屏覆盖层 ---------------- */
+.cue-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 9, 16, .92);
+  backdrop-filter: blur(4px);
+  animation: cue-in .25s ease-out;
+}
+@keyframes cue-in {
+  from { opacity: 0; transform: scale(1.04); }
+  to { opacity: 1; transform: scale(1); }
+}
+.cue-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3vh;
+  text-align: center;
+  padding: 4vh 4vw;
+}
+.cue-overlay-label {
+  font-size: 2.2vw;
+  letter-spacing: 1.4vw;
+  color: #cdd7ea;
+  padding-left: 1.4vw;
+}
+.cue-overlay-text {
+  font-size: 11vw;
+  font-weight: 800;
+  letter-spacing: 1vw;
+  line-height: 1.15;
+  text-shadow: 0 0 90px currentColor;
+}
+.cue-stage { color: var(--green); }
+.cue-stage .cue-overlay-text { color: var(--green); }
+.cue-hurry { color: var(--amber); }
+.cue-hurry .cue-overlay-text { color: var(--amber); animation: pulse-amber 1s ease-in-out infinite; }
+.cue-end { color: var(--red); }
+.cue-end .cue-overlay-text { color: var(--red); animation: pulse-red 1s ease-in-out infinite; }
+.cue-custom .cue-overlay-text { color: var(--accent); }
+
+.cue-ack-btn {
+  appearance: none;
+  margin-top: 2vh;
+  padding: 2vh 5vw;
+  font-size: 2.6vw;
+  font-weight: 700;
+  font-family: inherit;
+  letter-spacing: .4vw;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 0 50px rgba(79, 140, 255, .45);
+  transition: transform .12s;
+}
+.cue-ack-btn:hover { transform: scale(1.05); }
+.cue-overlay-hint { font-size: 1.3vw; color: var(--muted); }
+
+/* ---------------- 控制台：后台提示面板 ---------------- */
+.cue-panel { padding-bottom: 18px; }
+.cue-toolbar { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
+.cue-preset-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.btn-cue { font-weight: 700; }
+.cue-stage.btn-cue { color: var(--green); border-color: rgba(46, 204, 113, .55); background: rgba(46, 204, 113, .12); }
+.cue-hurry.btn-cue { color: var(--amber); border-color: rgba(255, 176, 32, .55); background: rgba(255, 176, 32, .12); }
+.cue-end.btn-cue { color: #ff7676; border-color: rgba(255, 68, 68, .55); background: rgba(255, 68, 68, .12); }
+
+.cue-custom-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cue-custom-row input {
+  flex: 1 1 260px;
+  padding: 10px 12px;
+  font-size: 15px;
+  border-radius: 8px;
+  border: 1px solid #33405f;
+  background: var(--panel-2);
+  color: var(--text);
+}
+.cue-char-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cue-target-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cue-target-desc { color: #aebbd4; font-size: 13px; }
+.cue-flash { color: var(--green); font-size: 13px; font-weight: 700; }
+
+.screen-table { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
+.screen-row {
+  display: grid;
+  grid-template-columns: 44px minmax(180px, 2fr) 90px minmax(200px, 2.4fr) 150px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: 14px;
+}
+.screen-row:hover { border-color: #3a4665; }
+.screen-selected { border-color: rgba(79, 140, 255, .7); box-shadow: 0 0 14px rgba(79, 140, 255, .12); }
+.screen-offline { opacity: .65; }
+.screen-head {
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 10px;
+  cursor: default;
+}
+.screen-name-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.screen-name-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.screen-name-btn:hover { color: var(--accent); text-decoration: underline; }
+.screen-rename-input {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 14px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: #141c2e;
+  color: var(--text);
+}
+.screen-id { color: var(--muted); font-size: 12px; }
+.screen-cue-text { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.muted { color: var(--muted); font-style: normal; }
+.cue-seq { color: var(--muted); font-size: 12px; }
+
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+.dot-on { background: var(--green); box-shadow: 0 0 8px rgba(46, 204, 113, .7); }
+.dot-off { background: #55607a; }
+
+.cue-tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid;
+}
+.cue-tag-stage { color: var(--green); border-color: rgba(46, 204, 113, .6); background: rgba(46, 204, 113, .12); }
+.cue-tag-hurry { color: var(--amber); border-color: rgba(255, 176, 32, .6); background: rgba(255, 176, 32, .12); }
+.cue-tag-end { color: #ff7676; border-color: rgba(255, 68, 68, .6); background: rgba(255, 68, 68, .12); }
+.cue-tag-custom { color: var(--accent); border-color: rgba(79, 140, 255, .6); background: rgba(79, 140, 255, .12); }
+
+.cue-status { font-weight: 700; font-size: 13px; }
+.cue-status-pending { color: var(--amber); }
+.cue-status-displayed { color: var(--accent); }
+.cue-status-acked { color: var(--green); }

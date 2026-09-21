@@ -311,6 +311,197 @@ async function main() {
   f.ws.close();
   e.ws.close();
 
+  // -----------------------------------------------------------------------
+  // 后台提示（cue）：注册 / 发送 / 送达状态 / 覆盖 / 补发 / 权限
+  // -----------------------------------------------------------------------
+  console.log('17) 后台提示：投屏注册、roster 上屏、改名');
+  const ctl = await connect();
+  await next(ctl.inbox, 'hello');
+  await next(ctl.inbox, 'snapshot');
+  ctl.ws.send(JSON.stringify({ command: 'acquire' }));
+  await next(ctl.inbox, 'control');
+  await drain(ctl.inbox, 300);
+
+  const sid1 = 's-0123456789abcdef0123456789abcdef';
+  const sid2 = 's-abcdef0123456789abcdef0123456789';
+  const d1 = await connect();
+  await next(d1.inbox, 'hello');
+  await next(d1.inbox, 'snapshot');
+  d1.ws.send(JSON.stringify({ command: 'screen_register', screenId: sid1, name: '一号屏' }));
+  const reg1 = await next(d1.inbox, 'screen_registered');
+  ok('d1 注册回包 id/名称一致', reg1.screenId === sid1 && reg1.name === '一号屏' && reg1.isNew === true);
+
+  const d2 = await connect();
+  await next(d2.inbox, 'hello');
+  await next(d2.inbox, 'snapshot');
+  d2.ws.send(JSON.stringify({ command: 'screen_register', screenId: sid2 }));
+  const reg2 = await next(d2.inbox, 'screen_registered');
+  ok('d2 未取名时使用默认显示名', reg2.screenId === sid2 && /投屏 /.test(reg2.name), reg2.name);
+
+  let sRoster = await nextSnap(ctl.inbox, (m) =>
+    Array.isArray(m.screens) && m.screens.length === 2 && m.screens.every((x) => x.online));
+  ok('控制台 roster 见两块在线屏', sRoster.screens.length === 2);
+  const rowOf = (m, sid) => m.screens.find((x) => x.id === sid);
+  ok('初始均无提示', rowOf(sRoster, sid1).cue === null && rowOf(sRoster, sid2).cue === null);
+
+  d1.ws.send(JSON.stringify({ command: 'screen_rename', name: '舞台主屏' }));
+  await next(d1.inbox, 'screen_renamed');
+  sRoster = await nextSnap(ctl.inbox, (m) => rowOf(m, sid1)?.name === '舞台主屏');
+  ok('投屏改名同步控制台 roster', !!sRoster);
+
+  console.log('18) 后台提示：单播，非目标屏不显示；已显示回执');
+  ctl.ws.send(JSON.stringify({ command: 'cue_send', targetIds: [sid1], kind: 'stage' }));
+  const cueSent1 = await next(ctl.inbox, 'cue_sent');
+  ok('cue_sent 回执 seq=1', cueSent1.seq === 1, JSON.stringify(cueSent1));
+  const cue1 = await next(d1.inbox, 'cue');
+  ok('目标屏收到 cue（请上场 seq=1）', cue1.seq === 1 && cue1.kind === 'stage' && cue1.text === '请上场');
+  // 模拟投屏渲染后自动回执“已显示”
+  d1.ws.send(JSON.stringify({ command: 'cue_displayed', seq: 1 }));
+  sRoster = await nextSnap(ctl.inbox, (m) => rowOf(m, sid1)?.cue?.status === 'displayed'
+    && rowOf(m, sid1)?.cue?.seq === 1);
+  ok('控制台见到“已显示”', !!sRoster);
+  const d2leak = (await drain(d2.inbox, 300)).filter((m) => m.type === 'cue');
+  ok('非目标屏 d2 收不到任何 cue', d2leak.length === 0, JSON.stringify(d2leak));
+  sRoster = await nextSnap(ctl.inbox, (m) => rowOf(m, sid2)?.cue === null);
+  ok('非目标屏 roster 无提示', !!sRoster);
+
+  console.log('19) 后台提示：新提示覆盖旧提示，迟到旧确认不改新状态');
+  ctl.ws.send(JSON.stringify({ command: 'cue_send', targetIds: [sid1], kind: 'end' }));
+  const cueSent2 = await next(ctl.inbox, 'cue_sent');
+  ok('cueSeq 单调递增 seq=2', cueSent2.seq === 2);
+  const cue2 = await next(d1.inbox, 'cue');
+  ok('d1 收到新提示 seq=2（请结束）', cue2.seq === 2 && cue2.text === '请结束');
+  d1.ws.send(JSON.stringify({ command: 'cue_displayed', seq: 2 }));
+  await nextSnap(ctl.inbox, (m) => rowOf(m, sid1)?.cue?.seq === 2 && rowOf(m, sid1)?.cue?.status === 'displayed');
+  // 丢弃积压中更早的 pending 快照（nextSnap 只抽走匹配项），避免旧快照干扰后续断言
+  await drain(ctl.inbox, 100);
+  // 迟到的旧确认（seq=1）：新提示不得被改变；状态不变时服务端不应产生任何广播
+  d1.ws.send(JSON.stringify({ command: 'cue_ack', seq: 1 }));
+  await sleep(150);
+  const leaked = (await drain(ctl.inbox, 250)).filter((m) => m.type === 'snapshot');
+  ok('迟到旧确认不产生任何状态广播', leaked.length === 0, `got ${leaked.length}`);
+  // 借一次无关改名触发广播做权威对账：sid1 新提示必须仍是 displayed
+  ctl.ws.send(JSON.stringify({ command: 'screen_rename', screenId: sid2, name: '二号屏' }));
+  await next(ctl.inbox, 'screen_renamed');
+  const stable = await nextSnap(ctl.inbox, (m) => rowOf(m, sid2)?.name === '二号屏');
+  ok('迟到旧确认后新提示仍为 displayed（不翻转）',
+    rowOf(stable, sid1).cue.status === 'displayed' && rowOf(stable, sid1).cue.seq === 2,
+    JSON.stringify(rowOf(stable, sid1).cue));
+  const staleClear = (await drain(d1.inbox, 200)).filter((m) => m.type === 'cue_cleared');
+  ok('旧确认不产生 cue_cleared', staleClear.length === 0);
+
+  console.log('20) 后台提示：确认后状态=已确认并下发 cue_cleared');
+  d1.ws.send(JSON.stringify({ command: 'cue_ack', seq: 2 }));
+  const cleared = await next(d1.inbox, 'cue_cleared');
+  ok('确认收到 cue_cleared（同 seq）', cleared.seq === 2);
+  sRoster = await nextSnap(ctl.inbox, (m) => rowOf(m, sid1)?.cue?.status === 'acked');
+  ok('控制台见到“已确认”', !!sRoster);
+
+  console.log('21) 后台提示：全部在线广播，两块屏都收到');
+  ctl.ws.send(JSON.stringify({ command: 'cue_send', targetIds: [], kind: 'custom', text: '中场休息 10 分钟' }));
+  const cueSent3 = await next(ctl.inbox, 'cue_sent');
+  ok('广播 seq=3', cueSent3.seq === 3);
+  const bc1 = await next(d1.inbox, 'cue');
+  const bc2 = await next(d2.inbox, 'cue');
+  ok('d1/d2 均收到 seq=3 自定义内容', bc1.seq === 3 && bc2.seq === 3 && bc1.text === '中场休息 10 分钟');
+  d2.ws.send(JSON.stringify({ command: 'cue_displayed', seq: 3 }));
+  await nextSnap(ctl.inbox, (m) => rowOf(m, sid2)?.cue?.status === 'displayed');
+
+  console.log('22) 后台提示：断线重连补发未确认最新提示；已确认不补发');
+  d2.ws.close();
+  await nextSnap(ctl.inbox, (m) => rowOf(m, sid2)?.online === false);
+  const d2b = await connect();
+  await next(d2b.inbox, 'hello');
+  d2b.ws.send(JSON.stringify({ command: 'screen_register', screenId: sid2, name: '二号屏刷新' }));
+  const reg2b = await next(d2b.inbox, 'screen_registered');
+  ok('刷新沿用原 ID 注册', reg2b.screenId === sid2 && reg2b.isNew === false);
+  const replay = await next(d2b.inbox, 'cue');
+  ok('重连补发该屏未确认最新提示 seq=3', replay.seq === 3 && replay.text === '中场休息 10 分钟');
+  await nextSnap(ctl.inbox, (m) => rowOf(m, sid2)?.online === true);
+  // d1 的 seq=2 已确认，且当前最新是 seq=3（未确认）—— d1 断线重连也应补发 seq=3 而非旧提示
+  d1.ws.close();
+  const d1b = await connect();
+  await next(d1b.inbox, 'hello');
+  d1b.ws.send(JSON.stringify({ command: 'screen_register', screenId: sid1 }));
+  await next(d1b.inbox, 'screen_registered');
+  const replay1 = await next(d1b.inbox, 'cue');
+  ok('d1 重连补发的是最新 seq=3（不是已确认的 seq=2）', replay1.seq === 3, JSON.stringify(replay1));
+
+  console.log('23) 后台提示：离线屏显式发送排队未送达，重连即补发，非目标屏不收');
+  // d1 当前在线（d1b）：先收到 seq=4；随后断线再发 seq=5，验证真正的离线排队补发
+  ctl.ws.send(JSON.stringify({ command: 'cue_send', targetIds: [sid1], kind: 'hurry' }));
+  const cueSent4 = await next(ctl.inbox, 'cue_sent');
+  ok('在线单屏发送 seq=4 成功', cueSent4.seq === 4);
+  const cue4live = await next(d1b.inbox, 'cue');
+  ok('在线目标即时收到 seq=4（请加快）', cue4live.seq === 4 && cue4live.kind === 'hurry');
+  const d2bLeak = (await drain(d2b.inbox, 250)).filter((m) => m.type === 'cue');
+  ok('非目标 d2b 未收到 seq=4', d2bLeak.length === 0);
+
+  d1b.ws.close();
+  await nextSnap(ctl.inbox, (m) => rowOf(m, sid1)?.online === false);
+  ctl.ws.send(JSON.stringify({ command: 'cue_send', targetIds: [sid1], kind: 'stage' }));
+  const cueSent5 = await next(ctl.inbox, 'cue_sent');
+  ok('发给离线屏 seq=5 成功（排队）', cueSent5.seq === 5);
+  sRoster = await nextSnap(ctl.inbox, (m) =>
+    rowOf(m, sid1)?.cue?.seq === 5 && rowOf(m, sid1)?.cue?.status === 'pending'
+    && rowOf(m, sid1)?.online === false);
+  ok('离线目标显示“未送达（离线，待补发）”', !!sRoster);
+  const d1c = await connect();
+  await next(d1c.inbox, 'hello');
+  d1c.ws.send(JSON.stringify({ command: 'screen_register', screenId: sid1 }));
+  await next(d1c.inbox, 'screen_registered');
+  const replay5 = await next(d1c.inbox, 'cue');
+  ok('重连补发离线期间最新提示 seq=5（旧 seq=4 已被覆盖）',
+    replay5.seq === 5 && replay5.kind === 'stage', JSON.stringify(replay5));
+
+  console.log('23b) 后台提示：断线期间“确认”丢失，重连后未确认提示重新弹出');
+  // d1c 收到 seq=5 后立即断开，确认从未到达服务端（服务端仍为 pending）
+  d1c.ws.close();
+  const sOffline2 = await nextSnap(ctl.inbox, (m) => rowOf(m, sid1)?.online === false);
+  ok('服务端 seq=5 仍未确认（pending），本地“确认”未送达',
+    rowOf(sOffline2, sid1).cue.status === 'pending' && rowOf(sOffline2, sid1).cue.seq === 5);
+  const d1d = await connect();
+  await next(d1d.inbox, 'hello');
+  d1d.ws.send(JSON.stringify({ command: 'screen_register', screenId: sid1 }));
+  await next(d1d.inbox, 'screen_registered');
+  const replay5b = await next(d1d.inbox, 'cue');
+  ok('确认丢失后重连再次补发同一未确认提示 seq=5', replay5b.seq === 5, JSON.stringify(replay5b));
+
+  console.log('24) 后台提示：权限与校验');
+  const outsider = await connect();
+  await next(outsider.inbox, 'hello');
+  await next(outsider.inbox, 'snapshot');
+  outsider.ws.send(JSON.stringify({ command: 'cue_send', targetIds: [], kind: 'stage' }));
+  const cueDenied = await next(outsider.inbox, 'error');
+  ok('非持有者发送返回 NOT_CONTROLLER', cueDenied.code === 'NOT_CONTROLLER');
+  outsider.ws.send(JSON.stringify({ command: 'screen_register', screenId: 'bad-id' }));
+  const badId = await next(outsider.inbox, 'error');
+  ok('非法 screenId 返回 BAD_SCREEN_ID', badId.code === 'BAD_SCREEN_ID');
+  outsider.ws.close();
+
+  ctl.ws.send(JSON.stringify({ command: 'cue_send', targetIds: [], kind: 'custom', text: '   ' }));
+  const badCue = await next(ctl.inbox, 'error');
+  ok('空白自定义返回 BAD_CUE', badCue.code === 'BAD_CUE');
+  ctl.ws.send(JSON.stringify({
+    command: 'cue_send',
+    targetIds: [],
+    kind: 'custom',
+    text: '字'.repeat(40),
+  }));
+  const over = await next(ctl.inbox, 'cue_sent');
+  const longSeq = over.seq;
+  // 任一在线投屏收到即可（此时 d1c/d2b 均在线）；首个没命中不致命，继续看另一屏
+  let longCue = await next(d1c.inbox, 'cue', 1200).catch(() => null);
+  if (!longCue || longCue.seq !== longSeq) {
+    longCue = await next(d2b.inbox, 'cue', 1200).catch(() => null);
+  }
+  ok('超长自定义按 30 字截断下发', longCue && longCue.seq === longSeq && [...longCue.text].length === 30,
+    longCue ? `len=${[...longCue.text].length}` : '未收到');
+
+  ctl.ws.close();
+  d1d.ws.close();
+  d2b.ws.close();
+
   console.log(`\n结果：${passed} 通过，${failures.length} 失败`);
   if (failures.length) {
     console.log('失败项:', failures.join('; '));

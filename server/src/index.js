@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { normalizeItems, projectAgenda, genItemId } from './agenda.js';
+import { ScreenRegistry } from './screens.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '../../client/dist');
@@ -86,6 +87,11 @@ function virtElapsedMs() {
 let version = 0;        // 单调递增版本号，永不在运行期内归零
 const epoch = epochId(); // 服务进程纪元：客户端用它识别“服务端已重启”
 
+// ---------------------------------------------------------------------------
+// 后台提示：屏幕注册表（内存）。每屏只保留最新一条提示及其送达状态。
+// ---------------------------------------------------------------------------
+const screens = new ScreenRegistry();
+
 function remainingNow() {
   if (timer.phase === 'running') {
     return Math.max(0, timer.deadlineMono - nowMono());
@@ -128,6 +134,8 @@ function buildSnapshot() {
       deviationMs,
       items: projected,
     },
+    // 后台提示：控制台按屏幕查看在线状态与最新提示的未送达/已显示/已确认
+    screens: screens.roster(),
   };
 }
 
@@ -290,7 +298,12 @@ function fail(client, code, message) {
 function handleCommand(client, msg) {
   const cmd = msg.command;
 
-  if (cmd !== 'acquire' && cmd !== 'heartbeat' && cmd !== 'release') {
+  // 投屏端指令（注册/改名/提示回执）无需持有控制权；其余指令仅持有者可执行
+  const PUBLIC_COMMANDS = new Set([
+    'acquire', 'heartbeat', 'release',
+    'screen_register', 'screen_rename', 'cue_displayed', 'cue_ack',
+  ]);
+  if (!PUBLIC_COMMANDS.has(cmd)) {
     if (!holder || holder.id !== client.id) {
       fail(client, 'NOT_CONTROLLER', '当前控制台未持有控制权');
       return;
@@ -448,6 +461,111 @@ function handleCommand(client, msg) {
       return;
     }
 
+    // -----------------------------------------------------------------------
+    // 后台提示
+    // -----------------------------------------------------------------------
+    case 'screen_register': {
+      // 投屏首次打开 / 刷新 / 重连时用浏览器持久化的同一 screenId 注册。
+      // 同一连接只允许绑定一块屏；重注册必须沿用原 ID（页面刷新会建立新连接，不受此限）。
+      const askedId = String(msg.screenId ?? '');
+      if (client.screenId && client.screenId !== askedId) {
+        fail(client, 'BAD_SCREEN_ID', '该连接已绑定其他屏幕，请重新建立连接');
+        return;
+      }
+      let r;
+      try {
+        r = screens.register(askedId, client.ws, msg.name);
+      } catch (e) {
+        fail(client, e.code || 'BAD_SCREEN_ID', e.message);
+        return;
+      }
+      client.screenId = r.screen.id;
+      send(client.ws, {
+        type: 'screen_registered',
+        screenId: r.screen.id,
+        name: r.screen.name,
+        isNew: r.isNew,
+      });
+      // 补发该屏未确认的最新提示（断线重连 / 刷新 / 同屏新标签页）
+      for (const cue of r.replays) sendCueTo(client.ws, cue);
+      broadcastSnapshot(); // roster 在线状态/新屏幕变化
+      return;
+    }
+
+    case 'screen_rename': {
+      const target = String(msg.screenId ?? '');
+      let sid;
+      if (target && target !== client.screenId) {
+        // 控制台代任意屏改名：必须持有控制权
+        if (!holder || holder.id !== client.id) {
+          fail(client, 'NOT_CONTROLLER', '只有持有控制权的控制台可修改其他屏幕名称');
+          return;
+        }
+        sid = target;
+      } else {
+        sid = client.screenId; // 投屏修改自身名称
+      }
+      if (!sid) {
+        fail(client, 'NOT_A_SCREEN', '该连接尚未注册屏幕');
+        return;
+      }
+      let r;
+      try {
+        r = screens.rename(sid, msg.name);
+      } catch (e) {
+        fail(client, e.code || 'BAD_NAME', e.message);
+        return;
+      }
+      send(client.ws, { type: 'screen_renamed', screenId: r.screen.id, name: r.screen.name });
+      if (r.changed) broadcastSnapshot();
+      return;
+    }
+
+    case 'cue_send': {
+      // 向一块、多块或全部在线投屏发送提示；每次生成单调递增 cueSeq
+      let r;
+      try {
+        r = screens.sendCue(msg.targetIds, { kind: msg.kind, text: msg.text });
+      } catch (e) {
+        fail(client, e.code || 'BAD_CUE', e.message);
+        return;
+      }
+      for (const d of r.deliveries) sendCueTo(d.token, d.cue);
+      send(client.ws, { type: 'cue_sent', seq: r.seq });
+      broadcastSnapshot(); // 各目标状态（pending/在线情况）立即上屏控制台
+      return;
+    }
+
+    case 'cue_displayed': {
+      // 投屏回执：提示已全屏显示。迟到的旧 seq 回执会被状态机忽略。
+      const sid = client.screenId;
+      if (!sid) {
+        fail(client, 'NOT_A_SCREEN', '该连接尚未注册屏幕');
+        return;
+      }
+      const r = screens.markDisplayed(sid, Number(msg.seq));
+      if (r.changed) broadcastSnapshot();
+      return;
+    }
+
+    case 'cue_ack': {
+      // 投屏回执：现场已确认。仅当前提示的确认能改变状态。
+      const sid = client.screenId;
+      if (!sid) {
+        fail(client, 'NOT_A_SCREEN', '该连接尚未注册屏幕');
+        return;
+      }
+      const r = screens.markAcked(sid, Number(msg.seq));
+      if (r.changed) {
+        // 通知该屏全部连接收起提示层（同一屏幕多标签页时同步）
+        for (const token of r.tokens) {
+          send(token, { type: 'cue_cleared', screenId: sid, seq: Number(msg.seq) });
+        }
+        broadcastSnapshot();
+      }
+      return;
+    }
+
     default:
       fail(client, 'UNKNOWN_COMMAND', `未知指令: ${cmd}`);
   }
@@ -465,12 +583,24 @@ function send(ws, obj) {
   }
 }
 
+// 向某条连接投递提示（首投与断线重连补发走同一通道）
+function sendCueTo(ws, cue) {
+  send(ws, {
+    type: 'cue',
+    seq: cue.seq,
+    kind: cue.kind,
+    text: cue.text,
+    sentAtMs: cue.sentAtMs,
+  });
+}
+
 function makeClient(ws) {
   const client = {
     id: `c-${Math.random().toString(36).slice(2, 10)}`,
     ws,
     joinedMono: nowMono(),
     lastDenyAtMono: 0,
+    screenId: null, // screen_register 后绑定；同一连接只属于一块屏幕
   };
   ws.on('message', (data) => {
     let msg;
@@ -489,6 +619,11 @@ function makeClient(ws) {
   });
   ws.on('close', () => {
     clients.delete(client);
+    // 解绑屏幕连接：该屏全部连接都关闭后转为离线（最新提示状态保留，等待重连补发）
+    if (client.screenId) {
+      const r = screens.unbind(client.screenId, ws);
+      if (r.wentOffline) broadcastSnapshot();
+    }
     if (holder && holder.id === client.id) {
       releaseHolder('disconnected'); // 断线即释放唯一控制权
     }
